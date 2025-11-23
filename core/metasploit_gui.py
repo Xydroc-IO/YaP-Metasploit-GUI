@@ -291,9 +291,10 @@ class MetasploitGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("YaP Metasploit GUI")
+        # Optimized window size for better fit in AppImage
         self.root.geometry("1400x900")
         self.root.resizable(True, True)
-        self.root.minsize(1000, 700)
+        self.root.minsize(1200, 750)  # Increased minimum size to ensure everything fits
         
         self.console = None
         self.tray_icon = None
@@ -320,14 +321,35 @@ class MetasploitGUI:
     def _find_icon_path(self):
         """Find icon/logo path."""
         if getattr(sys, 'frozen', False):
+            # PyInstaller/AppImage context
             if hasattr(sys, '_MEIPASS'):
-                base_paths = [sys._MEIPASS, os.path.dirname(sys.executable)]
+                # PyInstaller bundle
+                base_paths = [
+                    sys._MEIPASS,
+                    os.path.dirname(sys.executable),
+                    os.path.join(os.path.dirname(sys.executable), ".."),
+                ]
             else:
-                base_paths = [os.path.dirname(sys.executable)]
+                # Standalone executable
+                base_paths = [
+                    os.path.dirname(sys.executable),
+                    os.path.join(os.path.dirname(sys.executable), ".."),
+                ]
+            
+            # For AppImage, also check the AppDir structure
+            exe_dir = os.path.dirname(sys.executable)
+            if "_internal" in exe_dir or "usr/bin" in exe_dir:
+                # AppImage structure: check AppDir root
+                appdir_root = exe_dir
+                while "_internal" in appdir_root or "usr/bin" in appdir_root:
+                    appdir_root = os.path.dirname(appdir_root)
+                base_paths.insert(0, appdir_root)
         else:
+            # Development context
             base_paths = [
                 os.path.dirname(os.path.dirname(__file__)),
                 os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), ".."),
             ]
         
         icon_paths = []
@@ -336,6 +358,10 @@ class MetasploitGUI:
                 os.path.join(base, "yapmetasploitgui250.png"),
                 os.path.join(base, "icon.png"),
                 os.path.join(base, "yaplab.png"),
+                os.path.join(base, "yap-metasploit-gui.png"),
+                # Check in common subdirectories
+                os.path.join(base, "icons", "yapmetasploitgui250.png"),
+                os.path.join(base, "icons", "icon.png"),
             ])
         
         for path in icon_paths:
@@ -351,15 +377,20 @@ class MetasploitGUI:
                 icon_path = self._find_icon_path()
                 if icon_path and HAS_PIL:
                     img = Image.open(icon_path)
-                    # Resize to a reasonable size for display (e.g., 64x64 or 80x80)
-                    img = img.resize((80, 80), Image.Resampling.LANCZOS)
+                    # Resize to a more prominent size for display (96x96 for better visibility)
+                    img = img.resize((96, 96), Image.Resampling.LANCZOS)
                     self.logo_photo = ImageTk.PhotoImage(img)
                     
                     def _display():
                         if hasattr(self, 'logo_photo') and hasattr(self, 'logo_label'):
                             # Update the existing logo label with the image
                             self.logo_label.config(image=self.logo_photo)
+                            # Center the logo
+                            self.logo_label.config(anchor='center')
                     self.root.after(0, _display)
+                elif icon_path:
+                    # If PIL is not available, try to use a simple text label
+                    self.root.after(0, lambda: self.logo_label.config(text="[Logo]", font=("Segoe UI", 12)))
             except Exception as e:
                 # Silently fail if logo can't be loaded
                 pass
@@ -431,11 +462,11 @@ class MetasploitGUI:
         main_frame.pack(fill=tk.BOTH, expand=True)
         
         title_frame = ttk.Frame(main_frame)
-        title_frame.pack(pady=(0, 10))
+        title_frame.pack(pady=(10, 10))
         
         # Create logo label first (empty initially) so it's packed before title
         self.logo_label = ttk.Label(title_frame)
-        self.logo_label.pack(pady=(0, 5))
+        self.logo_label.pack(pady=(0, 8))
         
         # Load and display logo image (will update the label when ready)
         self._load_logo()
@@ -444,17 +475,17 @@ class MetasploitGUI:
         title_label = ttk.Label(
             title_frame,
             text="YaP Metasploit GUI",
-            font=("Segoe UI", 16, "bold")
+            font=("Segoe UI", 18, "bold")
         )
         title_label.pack()
         
         subtitle_label = ttk.Label(
             title_frame,
             text="Automated Metasploit Framework Interface",
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 10),
             foreground="#666666"
         )
-        subtitle_label.pack(pady=(3, 0))
+        subtitle_label.pack(pady=(4, 0))
         
         self.notebook = ttk.Notebook(main_frame)
         self.notebook.pack(fill=tk.BOTH, expand=True, pady=(10, 0))

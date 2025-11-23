@@ -1,14 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 
 block_cipher = None
+
+# Build datas list conditionally based on what files exist
+# PyInstaller runs from the directory containing the spec file
+datas_list = [('yapmetasploitgui250.png', '.')]
+if os.path.exists('icon.png'):
+    datas_list.append(('icon.png', '.'))
+if os.path.exists('yaplab.png'):
+    datas_list.append(('yaplab.png', '.'))
 
 a = Analysis(
     ['core/metasploit_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        ('yapmetasploitgui250.png', '.'),
-    ],
+    datas=datas_list,
     hiddenimports=[
         'tkinter',
         'tkinter.ttk',
