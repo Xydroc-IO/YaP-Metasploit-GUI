@@ -37,7 +37,18 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'matplotlib',  # Not needed
+        'numpy',  # Not needed (unless PIL requires it)
+        'scipy',  # Not needed
+        'pandas',  # Not needed
+        'IPython',  # Not needed
+        'jupyter',  # Not needed
+        'notebook',  # Not needed
+        'pytest',  # Not needed
+        'setuptools',  # Not needed at runtime
+        'distutils',  # Not needed at runtime
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -54,8 +65,8 @@ exe = EXE(
     name='yap-metasploit-gui',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
+    strip=True,  # Strip symbols to reduce size and improve startup
+    upx=False,  # UPX can slow startup, keep False
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -69,8 +80,8 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
-    strip=False,
-    upx=False,
+    strip=True,  # Strip symbols to reduce size
+    upx=False,  # UPX can slow startup
     upx_exclude=[],
     name='yap-metasploit-gui',
 )
