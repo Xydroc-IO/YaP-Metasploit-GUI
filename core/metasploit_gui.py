@@ -187,6 +187,12 @@ class MetasploitConsole:
                 # Also set SUDO_ASKPASS in global environment so child processes inherit it
                 os.environ['SUDO_ASKPASS'] = askpass_path
                 
+                # Preserve current user info for askpass script (important when sudo runs it)
+                if 'USER' in os.environ:
+                    env['YAP_ORIGINAL_USER'] = os.environ['USER']
+                if 'HOME' in os.environ:
+                    env['YAP_ORIGINAL_HOME'] = os.environ['HOME']
+                
                 # Pass preferred monitor to askpass script via environment
                 env['YAP_PREFERRED_MONITOR'] = preferred_monitor
                 os.environ['YAP_PREFERRED_MONITOR'] = preferred_monitor
@@ -635,6 +641,12 @@ class MetasploitGUI:
             if 'DISPLAY' not in os.environ:
                 display = os.environ.get('DISPLAY', ':0')
                 os.environ['DISPLAY'] = display
+            
+            # Preserve current user info for askpass script (important when sudo runs it)
+            if 'USER' in os.environ:
+                os.environ['YAP_ORIGINAL_USER'] = os.environ['USER']
+            if 'HOME' in os.environ:
+                os.environ['YAP_ORIGINAL_HOME'] = os.environ['HOME']
             
             # Set preferred monitor
             preferred_monitor = self.settings.get('preferred_monitor', 'primary')
@@ -6797,13 +6809,47 @@ Loot Items: {len(self.loot_data)}
         # Handle sudo password
         password_input = self.settings_sudo_password.get()
         if password_input and password_input != "••••••••":
-            # User entered a new password - encrypt and save it
-            encrypted = self._encrypt_password(password_input)
-            if encrypted:
-                self.settings['sudo_password_encrypted'] = encrypted
-                self._saved_sudo_password_encrypted = encrypted
-                # Clear the entry field and show placeholder
-                self.settings_sudo_password.set("••••••••")
+            # User entered a new password - strip whitespace and encrypt it
+            # Strip leading/trailing whitespace but preserve internal spaces if any
+            password_clean = password_input.strip()
+            
+            # Debug: Log what we're saving (for troubleshooting)
+            try:
+                debug_log = os.path.expanduser("~/.yap_password_save_debug.log")
+                with open(debug_log, 'a') as f:
+                    import datetime
+                    f.write(f"{datetime.datetime.now()}: Saving password\n")
+                    f.write(f"  password_input (raw): {repr(password_input)}\n")
+                    f.write(f"  password_input length: {len(password_input)}\n")
+                    f.write(f"  password_clean: {repr(password_clean)}\n")
+                    f.write(f"  password_clean length: {len(password_clean)}\n")
+                    f.write(f"  password_clean bytes: {password_clean.encode('utf-8')}\n")
+                    f.flush()
+            except:
+                pass
+            
+            if password_clean:
+                encrypted = self._encrypt_password(password_clean)
+                if encrypted:
+                    # Verify encryption/decryption works
+                    decrypted_test = self._decrypt_password(encrypted)
+                    if decrypted_test != password_clean:
+                        # Encryption/decryption mismatch - log it
+                        try:
+                            debug_log = os.path.expanduser("~/.yap_password_save_debug.log")
+                            with open(debug_log, 'a') as f:
+                                import datetime
+                                f.write(f"{datetime.datetime.now()}: WARNING - Encryption mismatch!\n")
+                                f.write(f"  Original: {repr(password_clean)}\n")
+                                f.write(f"  Decrypted: {repr(decrypted_test)}\n")
+                                f.flush()
+                        except:
+                            pass
+                    
+                    self.settings['sudo_password_encrypted'] = encrypted
+                    self._saved_sudo_password_encrypted = encrypted
+                    # Clear the entry field and show placeholder
+                    self.settings_sudo_password.set("••••••••")
         elif password_input == "" or self._saved_sudo_password_encrypted == "__DELETE__":
             # User cleared the password - remove it from settings
             if 'sudo_password_encrypted' in self.settings:

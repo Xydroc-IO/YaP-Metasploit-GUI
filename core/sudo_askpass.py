@@ -5,11 +5,110 @@ This script is called by sudo when a password is needed.
 """
 import sys
 import os
+
+# CRITICAL: Try to get and output saved password FIRST, before any other imports
+# This ensures we can return the password even if GUI libraries fail to load
+try:
+    import json
+    import base64
+    import hashlib
+    
+    def get_original_user_home():
+        """Get the original user's home directory (not root's when running via sudo)."""
+        sudo_user = os.environ.get('SUDO_USER')
+        original_home = os.environ.get('YAP_ORIGINAL_HOME')
+        if original_home and os.path.exists(original_home):
+            return original_home
+        if sudo_user:
+            try:
+                import pwd
+                return pwd.getpwnam(sudo_user).pw_dir
+            except:
+                home_path = os.path.join('/home', sudo_user)
+                if os.path.exists(home_path):
+                    return home_path
+        return os.path.expanduser("~")
+    
+    def decrypt_password(encrypted_password, user_home):
+        """Decrypt password from stored encrypted value."""
+        if not encrypted_password:
+            return None
+        try:
+            encrypted_bytes = base64.b64decode(encrypted_password.encode())
+            key = hashlib.sha256(user_home.encode()).hexdigest()[:32]
+            key_bytes = key.encode()
+            decrypted = bytearray()
+            for i, byte in enumerate(encrypted_bytes):
+                decrypted.append(byte ^ key_bytes[i % len(key_bytes)])
+            return decrypted.decode()
+        except:
+            return None
+    
+    # Try to get saved password immediately
+    user_home = get_original_user_home()
+    settings_file = os.path.join(user_home, ".yap_metasploit_gui_settings.json")
+    
+    if os.path.exists(settings_file):
+        try:
+            with open(settings_file, 'r') as f:
+                settings = json.load(f)
+                encrypted_password = settings.get('sudo_password_encrypted')
+                if encrypted_password:
+                    password = decrypt_password(encrypted_password, user_home)
+                    if password:
+                        # Output password immediately - no newline, no extra bytes
+                        # CRITICAL: This must be the ONLY place password is output
+                        # Strip any whitespace just to be safe
+                        password_clean = password.rstrip('\n\r\t ')
+                        
+                        # Write password using binary mode to ensure exact bytes
+                        # Sudo reads from stdin, so we need to write to stdout exactly
+                        if hasattr(sys.stdout, 'buffer'):
+                            # Python 3 - use buffer for exact byte control
+                            sys.stdout.buffer.write(password_clean.encode('utf-8'))
+                            sys.stdout.buffer.flush()
+                        else:
+                            # Fallback for older Python
+                            sys.stdout.write(password_clean)
+                            sys.stdout.flush()
+                        
+                        # Close stderr to avoid interfering
+                        try:
+                            sys.stderr.close()
+                            sys.stderr = open(os.devnull, 'w')
+                        except:
+                            pass
+                        # Exit immediately - do not continue to get_password()
+                        sys.exit(0)
+        except Exception as e:
+            # Log error to a file we can check
+            try:
+                error_log = os.path.join(user_home, ".yap_askpass_error.log")
+                with open(error_log, 'a') as f:
+                    import datetime
+                    f.write(f"{datetime.datetime.now()}: Early section error: {str(e)}\n")
+                    f.flush()
+            except:
+                pass
+            # If there's an error, continue to GUI dialog
+            pass
+except Exception as e:
+    # Log error
+    try:
+        error_log = os.path.expanduser("~/.yap_askpass_error.log")
+        with open(error_log, 'a') as f:
+            import datetime
+            f.write(f"{datetime.datetime.now()}: Early section import error: {str(e)}\n")
+            f.flush()
+    except:
+        pass
+    # If there's an error in the early section, continue to GUI dialog
+    pass
+
+# If we get here, no saved password was found or there was an error
+# Continue with the rest of the script to show GUI dialog
 import subprocess
 import re
-import json
-import base64
-import hashlib
 
 # Redirect stderr to avoid interfering with sudo's password reading
 # Sudo expects askpass to only output the password to stdout
@@ -65,15 +164,53 @@ def find_main_window_position():
     
     return None, None
 
-def decrypt_password(encrypted_password):
+def get_original_user_home():
+    """Get the original user's home directory (not root's when running via sudo)."""
+    # When sudo runs this script, SUDO_USER contains the original username
+    sudo_user = os.environ.get('SUDO_USER')
+    
+    # Also check for explicitly passed home directory
+    original_home = os.environ.get('YAP_ORIGINAL_HOME')
+    if original_home and os.path.exists(original_home):
+        return original_home
+    
+    if sudo_user:
+        try:
+            import pwd
+            user_info = pwd.getpwnam(sudo_user)
+            return user_info.pw_dir
+        except (KeyError, ImportError):
+            # Fallback: construct home path
+            home_path = os.path.join('/home', sudo_user)
+            if os.path.exists(home_path):
+                return home_path
+    
+    # If not running via sudo, use current user's home
+    current_home = os.path.expanduser("~")
+    # But if we're root and ~ is /root, try to find the actual user
+    if current_home == '/root' and not sudo_user:
+        # Try to get from environment or fallback to common locations
+        for env_var in ['HOME', 'YAP_ORIGINAL_HOME']:
+            if env_var in os.environ:
+                potential_home = os.environ[env_var]
+                if os.path.exists(potential_home) and potential_home != '/root':
+                    return potential_home
+    
+    return current_home
+
+def decrypt_password(encrypted_password, user_home=None):
     """Decrypt password from stored encrypted value."""
     if not encrypted_password:
         return None
     try:
+        # Get the original user's home directory for key generation
+        if user_home is None:
+            user_home = get_original_user_home()
+        
         # Decode from base64
         encrypted_bytes = base64.b64decode(encrypted_password.encode())
-        # Create the same key (based on user's home directory)
-        key = hashlib.sha256(os.path.expanduser("~").encode()).hexdigest()[:32]
+        # Create the same key (based on original user's home directory)
+        key = hashlib.sha256(user_home.encode()).hexdigest()[:32]
         key_bytes = key.encode()
         # XOR decryption
         decrypted = bytearray()
@@ -85,45 +222,228 @@ def decrypt_password(encrypted_password):
 
 def get_saved_password():
     """Try to get saved password from settings file."""
+    user_home = None
+    debug_log_path = None
     try:
-        settings_file = os.path.join(os.path.expanduser("~"), ".yap_metasploit_gui_settings.json")
+        # Get original user's home directory (important when running as root via sudo)
+        user_home = get_original_user_home()
+        settings_file = os.path.join(user_home, ".yap_metasploit_gui_settings.json")
+        debug_log_path = os.path.join(user_home, ".yap_askpass_debug.log")
+        
+        # Log attempt
+        try:
+            with open(debug_log_path, 'a') as f:
+                import datetime
+                f.write(f"{datetime.datetime.now()}: Attempting to get saved password\n")
+                f.write(f"  SUDO_USER={os.environ.get('SUDO_USER', 'NOT SET')}\n")
+                f.write(f"  YAP_ORIGINAL_USER={os.environ.get('YAP_ORIGINAL_USER', 'NOT SET')}\n")
+                f.write(f"  YAP_ORIGINAL_HOME={os.environ.get('YAP_ORIGINAL_HOME', 'NOT SET')}\n")
+                f.write(f"  user_home={user_home}\n")
+                f.write(f"  settings_file={settings_file}\n")
+                f.write(f"  settings_file_exists={os.path.exists(settings_file)}\n")
+                f.flush()
+        except:
+            pass
+        
         if os.path.exists(settings_file):
             with open(settings_file, 'r') as f:
                 settings = json.load(f)
                 encrypted_password = settings.get('sudo_password_encrypted')
+                
+                # Log what we found
+                try:
+                    with open(debug_log_path, 'a') as f:
+                        import datetime
+                        f.write(f"{datetime.datetime.now()}: Settings file read\n")
+                        f.write(f"  has_encrypted_password={bool(encrypted_password)}\n")
+                        f.write(f"  encrypted_length={len(encrypted_password) if encrypted_password else 0}\n")
+                        f.flush()
+                except:
+                    pass
+                
                 if encrypted_password:
-                    return decrypt_password(encrypted_password)
-    except Exception:
-        pass
+                    decrypted = decrypt_password(encrypted_password, user_home)
+                    
+                    # Log decryption result
+                    try:
+                        with open(debug_log_path, 'a') as f:
+                            import datetime
+                            f.write(f"{datetime.datetime.now()}: Decryption attempted\n")
+                            f.write(f"  decrypted_success={bool(decrypted)}\n")
+                            f.write(f"  decrypted_length={len(decrypted) if decrypted else 0}\n")
+                            f.flush()
+                    except:
+                        pass
+                    
+                    return decrypted
+                else:
+                    try:
+                        with open(debug_log_path, 'a') as f:
+                            import datetime
+                            f.write(f"{datetime.datetime.now()}: No encrypted password in settings\n")
+                            f.flush()
+                    except:
+                        pass
+        else:
+            try:
+                with open(debug_log_path, 'a') as f:
+                    import datetime
+                    f.write(f"{datetime.datetime.now()}: Settings file not found at {settings_file}\n")
+                    f.flush()
+            except:
+                pass
+    except Exception as e:
+        # Debug: Log error if possible
+        try:
+            if debug_log_path is None:
+                if user_home is None:
+                    user_home = get_original_user_home()
+                debug_log_path = os.path.join(user_home, ".yap_askpass_debug.log")
+            with open(debug_log_path, 'a') as f:
+                import datetime
+                import traceback
+                f.write(f"{datetime.datetime.now()}: Error getting saved password: {str(e)}\n")
+                f.write(f"  Traceback: {traceback.format_exc()}\n")
+                f.write(f"  SUDO_USER={os.environ.get('SUDO_USER', 'NOT SET')}\n")
+                f.write(f"  user_home={user_home if user_home else 'NOT SET'}\n")
+                f.write(f"  settings_file={os.path.join(user_home, '.yap_metasploit_gui_settings.json') if user_home else 'NOT SET'}\n")
+                f.flush()
+        except:
+            pass
     return None
 
 def get_password():
-    """Show password dialog and return password."""
-    # First, try to get saved password
-    saved_password = get_saved_password()
+    """Show password dialog and return password.
+    
+    NOTE: This function should only be called if the early password retrieval
+    at the top of the file didn't work. The early section should exit immediately
+    if a password is found, so this function should only run for GUI dialog fallback.
+    """
+    user_home = None
+    debug_log_path = None
+    
+    # Try to get saved password (fallback if early section didn't work)
+    saved_password = None
+    try:
+        user_home = get_original_user_home()
+        debug_log_path = os.path.join(user_home, ".yap_askpass_debug.log")
+        
+        # Log that script was called (this should rarely happen if early section worked)
+        try:
+            with open(debug_log_path, 'a') as f:
+                import datetime
+                f.write(f"{datetime.datetime.now()}: ===== get_password() called (fallback) =====\n")
+                f.write(f"  SUDO_USER={os.environ.get('SUDO_USER', 'NOT SET')}\n")
+                f.write(f"  YAP_ORIGINAL_USER={os.environ.get('YAP_ORIGINAL_USER', 'NOT SET')}\n")
+                f.write(f"  YAP_ORIGINAL_HOME={os.environ.get('YAP_ORIGINAL_HOME', 'NOT SET')}\n")
+                f.write(f"  USER={os.environ.get('USER', 'NOT SET')}\n")
+                f.write(f"  HOME={os.environ.get('HOME', 'NOT SET')}\n")
+                f.write(f"  user_home={user_home}\n")
+                f.flush()
+        except:
+            pass
+        
+        # Try to get saved password
+        saved_password = get_saved_password()
+    except Exception as e:
+        # If we can't get user home or password, log it but continue
+        try:
+            if debug_log_path:
+                with open(debug_log_path, 'a') as f:
+                    import datetime
+                    f.write(f"{datetime.datetime.now()}: Error in get_password setup: {str(e)}\n")
+                    f.flush()
+        except:
+            pass
+    
     if saved_password:
         # Debug: Log that we're using saved password
         try:
-            debug_log = os.path.expanduser("~/.yap_askpass_debug.log")
-            with open(debug_log, 'a') as f:
+            if debug_log_path is None:
+                if user_home is None:
+                    user_home = get_original_user_home()
+                debug_log_path = os.path.join(user_home, ".yap_askpass_debug.log")
+            with open(debug_log_path, 'a') as f:
                 import datetime
                 f.write(f"{datetime.datetime.now()}: Using saved password from settings\n")
+                f.write(f"  password_length={len(saved_password)}\n")
+                f.write(f"  password_preview={'*' * min(len(saved_password), 10)}\n")
                 f.flush()
         except:
             pass
         
         # Return saved password directly
         try:
-            sys.stdout.write(saved_password)
+            # CRITICAL: Output ONLY the password, no newline, no extra bytes
+            # Sudo expects exactly the password with no trailing newline
+            # Strip any potential whitespace that might have been added
+            password_to_send = saved_password.rstrip('\n\r\t ')
+            
+            # Log exactly what we're sending (for debugging)
+            try:
+                if debug_log_path is None:
+                    if user_home is None:
+                        user_home = get_original_user_home()
+                    debug_log_path = os.path.join(user_home, ".yap_askpass_debug.log")
+                with open(debug_log_path, 'a') as f:
+                    import datetime
+                    f.write(f"{datetime.datetime.now()}: About to send password to stdout\n")
+                    f.write(f"  password_length={len(password_to_send)}\n")
+                    f.write(f"  password_bytes={password_to_send.encode('utf-8')}\n")
+                    f.write(f"  password_repr={repr(password_to_send)}\n")
+                    f.flush()
+            except:
+                pass
+            
+            # Write password to stdout - must be exact text, no newline
+            # Use text mode (not buffer) as sudo expects text from askpass
+            sys.stdout.write(password_to_send)
             sys.stdout.flush()
+            
+            # Log that we sent the password
+            try:
+                if debug_log_path is None:
+                    if user_home is None:
+                        user_home = get_original_user_home()
+                    debug_log_path = os.path.join(user_home, ".yap_askpass_debug.log")
+                with open(debug_log_path, 'a') as f:
+                    import datetime
+                    f.write(f"{datetime.datetime.now()}: Password sent to stdout\n")
+                    f.flush()
+            except:
+                pass
+            
             try:
                 sys.stderr.close()
                 sys.stderr = open(os.devnull, 'w')
             except:
                 pass
             return 0
-        except (IOError, OSError):
-            # If stdout write fails, fall through to dialog
+        except (IOError, OSError) as e:
+            # If stdout write fails, log and fall through to dialog
+            try:
+                if debug_log_path is None:
+                    if user_home is None:
+                        user_home = get_original_user_home()
+                    debug_log_path = os.path.join(user_home, ".yap_askpass_debug.log")
+                with open(debug_log_path, 'a') as f:
+                    import datetime
+                    f.write(f"{datetime.datetime.now()}: Error writing password to stdout: {str(e)}\n")
+                    f.flush()
+            except:
+                pass
+    else:
+        # Log that no saved password was found
+        try:
+            if debug_log_path is None:
+                if user_home is None:
+                    user_home = get_original_user_home()
+                debug_log_path = os.path.join(user_home, ".yap_askpass_debug.log")
+            with open(debug_log_path, 'a') as f:
+                import datetime
+                f.write(f"{datetime.datetime.now()}: No saved password found, will show dialog\n")
+                f.flush()
+        except:
             pass
     
     # No saved password or it failed - show dialog
