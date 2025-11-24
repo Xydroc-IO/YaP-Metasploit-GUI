@@ -489,18 +489,6 @@ YaP-Metasploit-GUI/
 
 **Important**: This tool is designed for authorized security testing and educational purposes only. Only use Metasploit Framework and this GUI on systems you own or have explicit written permission to test. Unauthorized access to computer systems is illegal.
 
-## License
 
-© YaP Labs
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit issues or pull requests.
-
-## Support
-
-For issues, questions, or feature requests, please open an issue on the project repository.
-
----
 
 **Note**: This application requires Metasploit Framework to be installed. Ensure you have proper authorization before using this tool for security testing.
