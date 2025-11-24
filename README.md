@@ -34,6 +34,7 @@ A modern, cross-platform desktop application to automate and simplify using the 
 - **Session Groups**: Organize sessions into groups for better management
 - **Quick Actions Hub**: One-click access to common reconnaissance and post-exploitation actions
 - **Settings**: Customize application behavior, themes, and preferences
+- **Sudo Password Management**: Securely store and automatically use sudo password for scans and operations requiring elevated privileges
 - **Commands & Help**: Built-in command reference and help documentation
 
 ### User Interface
@@ -43,6 +44,8 @@ A modern, cross-platform desktop application to automate and simplify using the 
 - **System Tray Integration**: Minimize to system tray (Linux) for background operation
 - **Syntax Highlighting**: Color-coded console output for better readability
 - **Cross-Platform**: Works on Linux, Windows, and macOS
+- **AppImage Support**: Full icon and logo display support in AppImage builds
+- **Secure Password Storage**: Encrypted sudo password storage for seamless elevated privilege operations
 
 ## Requirements
 
@@ -73,20 +76,35 @@ The easiest way to install all dependencies:
 This script will:
 - Detect your Linux distribution automatically
 - Install all required system packages (Python, Tkinter, PIL/Pillow)
-- Install PostgreSQL and configure it for Metasploit
-- Install desktop environment dependencies for system tray support
-- Install Python dependencies via pip
+- Install PostgreSQL and configure it for Metasploit (with automatic initialization)
+- Install desktop environment dependencies for system tray support (XFCE, Cinnamon, GNOME, KDE, MATE, etc.)
+- Install Python dependencies via pip (automatically uses `--break-system-packages` flag when needed for Python 3.11+)
 - Check for Metasploit Framework
 - Verify PostgreSQL installation and status
+- Automatically start and enable PostgreSQL service
 
 **Supported Linux Distributions:**
 - Debian/Ubuntu/Mint/Pop!_OS/Elementary OS (apt)
 - Fedora/RHEL/CentOS (dnf/yum)
-- Arch/Manjaro/EndeavourOS/Garuda (pacman)
+- Arch/Manjaro/EndeavourOS/Garuda (pacman) - Full PostgreSQL initialization support
 - openSUSE/SLE (zypper)
 - Alpine Linux (apk)
 - Solus (eopkg)
 - Gentoo (emerge)
+
+**Desktop Environment Support:**
+- XFCE (full support with appindicator and GTK3)
+- Cinnamon (full support with appindicator and GTK3)
+- GNOME (full support)
+- KDE (full support)
+- MATE (full support)
+- All GTK-based desktop environments
+
+**Advanced Features:**
+- Automatically detects Python 3.11+ and uses `--break-system-packages` flag for pip
+- Comprehensive error handling with multiple fallback methods
+- Automatic PostgreSQL database initialization for Arch/Manjaro
+- Cross-distribution compatibility with intelligent package detection
 
 #### Manual Installation (Linux)
 
@@ -120,6 +138,10 @@ This script will:
 
 4. Install Python packages:
    ```bash
+   # For Python 3.11+ on systems with externally-managed environments (Arch, Manjaro, etc.):
+   pip install --break-system-packages -r requirements.txt
+   
+   # For older Python versions or systems without externally-managed environments:
    pip install -r requirements.txt
    ```
 
@@ -335,6 +357,10 @@ One-click access to common actions organized by category:
 - **Default LHOST/LPORT**: Configure default connection settings
 - **Auto-Init Database**: Automatically initialize database if not connected
 - **Preferred Monitor**: Select preferred monitor for window placement
+- **Sudo Password Storage**: Securely store your sudo password for automatic use during scans and operations requiring elevated privileges
+  - Password is encrypted before storage
+  - Automatically used when sudo is required
+  - Can be cleared from settings at any time
 
 #### 23. Commands & Help Tab
 
@@ -357,7 +383,8 @@ If Metasploit is installed in a non-standard location, ensure it's in your PATH 
 ### Database Configuration
 
 The application uses PostgreSQL for Metasploit database functionality. The dependency installer will:
-- Install PostgreSQL
+- Install PostgreSQL (including all required packages)
+- Initialize PostgreSQL database (on Arch/Manjaro and other distributions)
 - Start PostgreSQL service
 - Enable PostgreSQL on boot
 
@@ -365,6 +392,23 @@ You still need to initialize the Metasploit database:
 ```bash
 msfdb init
 ```
+
+### Sudo Password Storage
+
+For operations requiring elevated privileges (scans, database operations, etc.), you can store your sudo password securely:
+
+1. Go to **Settings** tab
+2. Scroll to **Sudo Password Settings** section
+3. Enter your sudo password (it will be masked)
+4. Click **Save Settings**
+5. Your password is encrypted and stored locally
+6. The application will automatically use it when sudo is required
+
+**Security Notes:**
+- Password is encrypted using a user-specific key before storage
+- Password is stored in `~/.yap_metasploit_gui_settings.json`
+- You can clear the stored password at any time from Settings
+- The password is only used when explicitly required by operations
 
 ### Console Settings
 
@@ -395,16 +439,36 @@ If the console fails to start:
 
 If database features don't work:
 1. Ensure PostgreSQL is installed and running: `sudo systemctl status postgresql`
-2. Initialize Metasploit database: `msfdb init`
-3. Check database status in the console tab
-4. Verify PostgreSQL service is enabled: `sudo systemctl enable postgresql`
+2. If PostgreSQL is not running, start it:
+   ```bash
+   sudo systemctl start postgresql
+   sudo systemctl enable postgresql
+   ```
+3. Initialize Metasploit database: `msfdb init`
+4. Check database status in the console tab
+5. On Arch/Manjaro, if PostgreSQL database needs initialization, the dependency installer handles this automatically
 
 ### Missing Dependencies
 
 If you see import errors:
 1. Run the dependency installer: `./installers/install-dependencies.sh`
-2. Or install manually: `pip install -r requirements.txt`
+2. Or install manually:
+   - For Python 3.11+ on Arch/Manjaro or systems with externally-managed environments:
+     ```bash
+     pip install --break-system-packages -r requirements.txt
+     ```
+   - For other systems:
+     ```bash
+     pip install -r requirements.txt
+     ```
 3. Ensure system packages are installed (see Manual Installation)
+
+### Pip Installation Errors (Python 3.11+)
+
+If you see "externally-managed-environment" errors:
+1. The dependency installer automatically handles this with `--break-system-packages` flag
+2. If installing manually, use: `pip install --break-system-packages -r requirements.txt`
+3. This is normal for newer Python installations on Arch, Manjaro, and other modern distributions
 
 ### Payload Generation Fails
 
@@ -463,6 +527,32 @@ YaP-Metasploit-GUI/
 - PostgreSQL (for database features)
 - Desktop environment packages (for system tray support on Linux)
 
+## AppImage Support
+
+YaP Metasploit GUI can be built as a portable AppImage for easy distribution and use across Linux distributions.
+
+### Building AppImage
+
+To build an AppImage, use the build script:
+```bash
+cd "/path/to/YaP Labs Releases/Metasploit GUI"
+./build-appimage.sh
+```
+
+The AppImage includes:
+- Full icon and logo display support
+- All dependencies bundled
+- Cross-distribution compatibility (Arch, Manjaro, Ubuntu, Fedora, etc.)
+- Desktop environment support (XFCE, Cinnamon, GNOME, KDE, etc.)
+
+### Using AppImage
+
+1. Download or build the AppImage
+2. Make it executable: `chmod +x YaP-Metasploit-GUI-x86_64.AppImage`
+3. Run it: `./YaP-Metasploit-GUI-x86_64.AppImage`
+
+The AppImage is self-contained and doesn't require installation. It works on all major Linux distributions.
+
 ## Development
 
 ### Running from Source
@@ -485,9 +575,26 @@ YaP-Metasploit-GUI/
    python3 core/metasploit_gui.py
    ```
 
+## Recent Updates
+
+### Version Improvements
+
+- **Sudo Password Storage**: Securely store and automatically use sudo password for operations requiring elevated privileges
+- **Enhanced Dependency Installer**: 
+  - Automatic PostgreSQL installation and initialization for all distributions
+  - Support for `--break-system-packages` flag for Python 3.11+ systems
+  - Comprehensive desktop environment support (XFCE, Cinnamon, GNOME, KDE, MATE)
+  - Improved error handling and fallback methods
+- **AppImage Improvements**: 
+  - Full icon and logo display support in AppImage builds
+  - Enhanced path detection for resources
+  - Better cross-distribution compatibility
+
 ## Security Notice
 
 **Important**: This tool is designed for authorized security testing and educational purposes only. Only use Metasploit Framework and this GUI on systems you own or have explicit written permission to test. Unauthorized access to computer systems is illegal.
+
+**Password Storage Security**: Stored sudo passwords are encrypted using a user-specific key. However, as with any stored credentials, use this feature responsibly and only on trusted systems.
 
 
 
