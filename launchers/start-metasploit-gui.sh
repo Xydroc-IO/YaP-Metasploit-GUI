@@ -95,3 +95,5 @@ echo ""
 cd "$CORE_DIR"
 python3 metasploit_gui.py
 
+
+
