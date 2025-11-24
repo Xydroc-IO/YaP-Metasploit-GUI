@@ -371,9 +371,9 @@ install_python_packages() {
     else
         print_warning "requirements.txt not found. Installing default packages..."
         python3 -m pip install --upgrade pip --user 2>/dev/null || python3 -m pip install --upgrade pip
-        python3 -m pip install --user Pillow pystray || \
-        pip3 install --user Pillow pystray || \
-        sudo pip3 install Pillow pystray
+        python3 -m pip install --user Pillow pystray PyYAML || \
+        pip3 install --user Pillow pystray PyYAML || \
+        sudo pip3 install Pillow pystray PyYAML
         print_success "Default Python packages installed"
     fi
 }
