@@ -7,6 +7,9 @@ import sys
 import os
 import subprocess
 import re
+import json
+import base64
+import hashlib
 
 # Redirect stderr to avoid interfering with sudo's password reading
 # Sudo expects askpass to only output the password to stdout
@@ -62,8 +65,68 @@ def find_main_window_position():
     
     return None, None
 
+def decrypt_password(encrypted_password):
+    """Decrypt password from stored encrypted value."""
+    if not encrypted_password:
+        return None
+    try:
+        # Decode from base64
+        encrypted_bytes = base64.b64decode(encrypted_password.encode())
+        # Create the same key (based on user's home directory)
+        key = hashlib.sha256(os.path.expanduser("~").encode()).hexdigest()[:32]
+        key_bytes = key.encode()
+        # XOR decryption
+        decrypted = bytearray()
+        for i, byte in enumerate(encrypted_bytes):
+            decrypted.append(byte ^ key_bytes[i % len(key_bytes)])
+        return decrypted.decode()
+    except Exception:
+        return None
+
+def get_saved_password():
+    """Try to get saved password from settings file."""
+    try:
+        settings_file = os.path.join(os.path.expanduser("~"), ".yap_metasploit_gui_settings.json")
+        if os.path.exists(settings_file):
+            with open(settings_file, 'r') as f:
+                settings = json.load(f)
+                encrypted_password = settings.get('sudo_password_encrypted')
+                if encrypted_password:
+                    return decrypt_password(encrypted_password)
+    except Exception:
+        pass
+    return None
+
 def get_password():
     """Show password dialog and return password."""
+    # First, try to get saved password
+    saved_password = get_saved_password()
+    if saved_password:
+        # Debug: Log that we're using saved password
+        try:
+            debug_log = os.path.expanduser("~/.yap_askpass_debug.log")
+            with open(debug_log, 'a') as f:
+                import datetime
+                f.write(f"{datetime.datetime.now()}: Using saved password from settings\n")
+                f.flush()
+        except:
+            pass
+        
+        # Return saved password directly
+        try:
+            sys.stdout.write(saved_password)
+            sys.stdout.flush()
+            try:
+                sys.stderr.close()
+                sys.stderr = open(os.devnull, 'w')
+            except:
+                pass
+            return 0
+        except (IOError, OSError):
+            # If stdout write fails, fall through to dialog
+            pass
+    
+    # No saved password or it failed - show dialog
     try:
         # Ensure DISPLAY is set (needed for GUI on Linux)
         # When called by sudo, we need to preserve the original user's DISPLAY

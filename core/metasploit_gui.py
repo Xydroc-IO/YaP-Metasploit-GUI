@@ -15,6 +15,8 @@ import re
 import json
 from pathlib import Path
 import shutil
+import base64
+import hashlib
 
 # Try to import PIL for icon support
 try:
@@ -443,6 +445,9 @@ class MetasploitGUI:
         # Load settings from file if exists
         self._load_settings()
         
+        # Initialize saved sudo password from settings
+        self._saved_sudo_password_encrypted = self.settings.get('sudo_password_encrypted')
+        
         # Set up SUDO_ASKPASS environment variable early so it's available globally
         # This ensures that when Metasploit spawns child processes (like nmap), they inherit it
         self._setup_sudo_askpass()
@@ -460,28 +465,56 @@ class MetasploitGUI:
         """Find icon/logo path."""
         if getattr(sys, 'frozen', False):
             # PyInstaller/AppImage context
-            if hasattr(sys, '_MEIPASS'):
-                # PyInstaller bundle
-                base_paths = [
-                    sys._MEIPASS,
-                    os.path.dirname(sys.executable),
-                    os.path.join(os.path.dirname(sys.executable), ".."),
-                ]
-            else:
-                # Standalone executable
-                base_paths = [
-                    os.path.dirname(sys.executable),
-                    os.path.join(os.path.dirname(sys.executable), ".."),
-                ]
+            base_paths = []
             
-            # For AppImage, also check the AppDir structure
+            if hasattr(sys, '_MEIPASS'):
+                # PyInstaller bundle - check _MEIPASS first (most reliable)
+                base_paths.append(sys._MEIPASS)
+            
+            # Get executable directory
             exe_dir = os.path.dirname(sys.executable)
-            if "_internal" in exe_dir or "usr/bin" in exe_dir:
-                # AppImage structure: check AppDir root
-                appdir_root = exe_dir
-                while "_internal" in appdir_root or "usr/bin" in appdir_root:
-                    appdir_root = os.path.dirname(appdir_root)
-                base_paths.insert(0, appdir_root)
+            
+            # Check for AppImage environment variable (if running from AppImage)
+            appimage_path = os.environ.get('APPIMAGE')
+            if appimage_path:
+                # We're running from an AppImage
+                # The mount point is typically in /tmp/.mount_* or can be derived from APPIMAGE
+                # Check common AppImage mount locations
+                appdir_from_env = os.environ.get('APPDIR')
+                if appdir_from_env and os.path.exists(appdir_from_env):
+                    base_paths.insert(0, appdir_from_env)
+            
+            # For AppImage, check the AppDir structure
+            # AppImage mounts to a temp directory like /tmp/.mount_AppNameXXXXXX
+            # The structure is: mount_point/usr/bin/executable
+            if "usr/bin" in exe_dir or ".mount_" in exe_dir or appimage_path:
+                # AppImage structure: find AppDir root
+                current = exe_dir
+                # Go up until we find the AppDir root (where .DirIcon would be)
+                for _ in range(5):  # Limit depth to avoid infinite loops
+                    if os.path.exists(os.path.join(current, ".DirIcon")) or \
+                       os.path.exists(os.path.join(current, "AppRun")):
+                        base_paths.insert(0, current)
+                        break
+                    parent = os.path.dirname(current)
+                    if parent == current:  # Reached root
+                        break
+                    current = parent
+                
+                # Also check usr/bin directory (where executable is)
+                if "usr/bin" in exe_dir:
+                    base_paths.insert(0, exe_dir)
+                    # Check parent of usr/bin (AppDir root)
+                    usr_bin_parent = os.path.dirname(os.path.dirname(exe_dir))
+                    if usr_bin_parent != exe_dir:
+                        base_paths.insert(0, usr_bin_parent)
+            
+            # Add standard paths
+            base_paths.extend([
+                exe_dir,
+                os.path.join(exe_dir, ".."),
+                os.path.join(exe_dir, "../.."),
+            ])
         else:
             # Development context
             base_paths = [
@@ -492,6 +525,8 @@ class MetasploitGUI:
         
         icon_paths = []
         for base in base_paths:
+            if not base or not os.path.exists(base):
+                continue
             icon_paths.extend([
                 os.path.join(base, "yapmetasploitgui250.png"),
                 os.path.join(base, "icon.png"),
@@ -500,10 +535,14 @@ class MetasploitGUI:
                 # Check in common subdirectories
                 os.path.join(base, "icons", "yapmetasploitgui250.png"),
                 os.path.join(base, "icons", "icon.png"),
+                # For AppImage, also check usr/bin
+                os.path.join(base, "usr", "bin", "yapmetasploitgui250.png"),
+                os.path.join(base, "usr", "bin", "icon.png"),
+                os.path.join(base, "usr", "bin", "yap-metasploit-gui.png"),
             ])
         
         for path in icon_paths:
-            if os.path.exists(path):
+            if os.path.exists(path) and os.path.isfile(path):
                 return path
         
         return None
@@ -630,6 +669,39 @@ class MetasploitGUI:
                 json.dump(self.settings, f, indent=2)
         except:
             pass
+    
+    def _encrypt_password(self, password):
+        """Encrypt password using simple XOR cipher with user-specific key."""
+        if not password:
+            return None
+        # Create a key based on user's home directory (simple obfuscation)
+        key = hashlib.sha256(os.path.expanduser("~").encode()).hexdigest()[:32]
+        key_bytes = key.encode()
+        password_bytes = password.encode()
+        # XOR encryption
+        encrypted = bytearray()
+        for i, byte in enumerate(password_bytes):
+            encrypted.append(byte ^ key_bytes[i % len(key_bytes)])
+        # Encode to base64 for safe storage
+        return base64.b64encode(encrypted).decode()
+    
+    def _decrypt_password(self, encrypted_password):
+        """Decrypt password from stored encrypted value."""
+        if not encrypted_password:
+            return None
+        try:
+            # Decode from base64
+            encrypted_bytes = base64.b64decode(encrypted_password.encode())
+            # Create the same key
+            key = hashlib.sha256(os.path.expanduser("~").encode()).hexdigest()[:32]
+            key_bytes = key.encode()
+            # XOR decryption
+            decrypted = bytearray()
+            for i, byte in enumerate(encrypted_bytes):
+                decrypted.append(byte ^ key_bytes[i % len(key_bytes)])
+            return decrypted.decode()
+        except Exception:
+            return None
     
     def get_monitors(self):
         """Get list of all available monitors.
@@ -772,7 +844,20 @@ class MetasploitGUI:
         self.root.after_idle(_center)
     
     def _ask_sudo_password(self, prompt="Administrator password required"):
-        """Show a password dialog and return the password."""
+        """Show a password dialog and return the password. Checks for saved password first."""
+        # First, check if we have a saved password
+        saved_password_encrypted = self.settings.get('sudo_password_encrypted')
+        if saved_password_encrypted:
+            try:
+                saved_password = self._decrypt_password(saved_password_encrypted)
+                if saved_password:
+                    # Return saved password without prompting
+                    return saved_password
+            except Exception:
+                # If decryption fails, fall through to prompt
+                pass
+        
+        # No saved password or decryption failed - prompt user
         password = simpledialog.askstring(
             "Password Required",
             f"{prompt}\n\nEnter your password:",
@@ -4721,6 +4806,36 @@ Select what you want to do below to get started."""
             variable=self.settings_auto_init_db
         ).pack(side=tk.LEFT)
         
+        # Sudo Password Settings
+        sudo_frame = ttk.LabelFrame(settings_frame, text="Sudo Password Settings", padding="5")
+        sudo_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        sudo_info_frame = ttk.Frame(sudo_frame)
+        sudo_info_frame.pack(fill=tk.X, pady=2)
+        
+        ttk.Label(sudo_info_frame, text="Sudo Password:", width=20).pack(side=tk.LEFT)
+        self.settings_sudo_password = tk.StringVar()
+        # Load saved password (decrypted) for display placeholder
+        # Use the instance variable that was set in __init__
+        if self._saved_sudo_password_encrypted:
+            # Show placeholder to indicate password is saved
+            self.settings_sudo_password.set("••••••••")
+        sudo_password_entry = ttk.Entry(sudo_frame, textvariable=self.settings_sudo_password, width=40, show="*")
+        sudo_password_entry.pack(side=tk.LEFT, padx=(0, 5))
+        
+        def clear_sudo_password():
+            """Clear the saved sudo password."""
+            self.settings_sudo_password.set("")
+            # Mark for deletion on save
+            self._saved_sudo_password_encrypted = "__DELETE__"
+            messagebox.showinfo("Info", "Sudo password will be cleared when you save settings.")
+        
+        ttk.Button(sudo_frame, text="Clear", command=clear_sudo_password, width=10).pack(side=tk.LEFT, padx=(0, 5))
+        
+        sudo_help_label = ttk.Label(sudo_frame, text="Enter your sudo password to use for scans and operations requiring elevated privileges.", 
+                                    foreground="gray", font=("TkDefaultFont", 8))
+        sudo_help_label.pack(fill=tk.X, pady=(5, 0))
+        
         # Save button
         save_frame = ttk.Frame(settings_frame)
         save_frame.pack(fill=tk.X, pady=(5, 0))
@@ -6678,6 +6793,24 @@ Loot Items: {len(self.loot_data)}
         self.settings['default_lport'] = self.settings_default_lport.get()
         self.settings['auto_init_db'] = self.settings_auto_init_db.get()
         self.settings['preferred_monitor'] = self.settings_preferred_monitor.get()
+        
+        # Handle sudo password
+        password_input = self.settings_sudo_password.get()
+        if password_input and password_input != "••••••••":
+            # User entered a new password - encrypt and save it
+            encrypted = self._encrypt_password(password_input)
+            if encrypted:
+                self.settings['sudo_password_encrypted'] = encrypted
+                self._saved_sudo_password_encrypted = encrypted
+                # Clear the entry field and show placeholder
+                self.settings_sudo_password.set("••••••••")
+        elif password_input == "" or self._saved_sudo_password_encrypted == "__DELETE__":
+            # User cleared the password - remove it from settings
+            if 'sudo_password_encrypted' in self.settings:
+                del self.settings['sudo_password_encrypted']
+            self._saved_sudo_password_encrypted = None
+        # If password_input is "••••••••", it means user didn't change it, so keep existing
+        
         self._save_settings()
         
         # Recenter window on preferred monitor if setting changed

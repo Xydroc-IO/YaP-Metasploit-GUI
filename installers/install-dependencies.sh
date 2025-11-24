@@ -1,9 +1,15 @@
 #!/bin/bash
 # YaP Metasploit GUI - Comprehensive Dependency Installer
 # Automatically detects Linux distribution and installs all required dependencies
-# Supports PostgreSQL, desktop environments, and all major Linux distributions
+# 
+# Features:
+# - Installs PostgreSQL for Metasploit database support
+# - Supports all major Linux distributions (Arch, Manjaro, Ubuntu, Debian, Fedora, etc.)
+# - Supports all desktop environments (XFCE, Cinnamon, GNOME, KDE, MATE, etc.)
+# - Uses --break-system-packages flag for pip when needed (Python 3.11+)
+# - Comprehensive error handling and fallback methods
 
-set -e  # Exit on error
+set -e  # Exit on error (but we'll handle some errors gracefully)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -76,7 +82,7 @@ detect_desktop() {
 
 # Install PostgreSQL based on distribution
 install_postgresql() {
-    print_status "Installing PostgreSQL..."
+    print_status "Installing PostgreSQL for Metasploit database support..."
     
     case $DISTRO in
         ubuntu|debian|linuxmint|pop|elementary)
@@ -102,6 +108,26 @@ install_postgresql() {
             ;;
         arch|manjaro|endeavour|garuda)
             sudo pacman -S --needed postgresql postgresql-libs libpqxx
+            # Initialize PostgreSQL database if not already initialized
+            # Check common PostgreSQL data directories
+            POSTGRES_DATA_DIR=""
+            if [ -d /var/lib/postgres/data ]; then
+                POSTGRES_DATA_DIR="/var/lib/postgres/data"
+            elif [ -d /var/lib/postgres ]; then
+                POSTGRES_DATA_DIR="/var/lib/postgres"
+            fi
+            
+            if [ -n "$POSTGRES_DATA_DIR" ] && [ ! -d "$POSTGRES_DATA_DIR/base" ] && [ ! -f "$POSTGRES_DATA_DIR/PG_VERSION" ]; then
+                print_status "Initializing PostgreSQL database..."
+                # Try to initialize with the postgres user
+                if id "postgres" &>/dev/null; then
+                    sudo -u postgres initdb -D "$POSTGRES_DATA_DIR" 2>/dev/null || \
+                    sudo -u postgres initdb --locale=C --encoding=UTF8 2>/dev/null || \
+                    sudo -u postgres initdb 2>/dev/null || true
+                else
+                    print_warning "PostgreSQL user not found. Database may need manual initialization."
+                fi
+            fi
             sudo systemctl enable postgresql 2>/dev/null || true
             sudo systemctl start postgresql 2>/dev/null || true
             ;;
@@ -150,6 +176,7 @@ install_desktop_deps() {
     case $DISTRO in
         ubuntu|debian|linuxmint|pop|elementary)
             # Install packages for all major desktop environments
+            # Supports XFCE, Cinnamon, GNOME, KDE, MATE, and other GTK-based DEs
             sudo apt install -y \
                 libappindicator3-1 \
                 gir1.2-appindicator3-0.1 \
@@ -157,9 +184,12 @@ install_desktop_deps() {
                 libgirepository1.0-dev \
                 python3-gi \
                 python3-gi-cairo \
-                gir1.2-gtk-3.0
+                gir1.2-gtk-3.0 \
+                libcairo2-dev \
+                libgdk-pixbuf2.0-dev
             ;;
         fedora|rhel|centos)
+            # Supports XFCE, Cinnamon, GNOME, KDE, and other GTK-based DEs
             sudo dnf install -y \
                 libappindicator \
                 libappindicator-gtk3 \
@@ -167,15 +197,20 @@ install_desktop_deps() {
                 gobject-introspection \
                 python3-gobject \
                 python3-cairo \
-                cairo-gobject-devel
+                cairo-gobject-devel \
+                gdk-pixbuf2
             ;;
         arch|manjaro|endeavour|garuda)
+            # Install comprehensive desktop environment support
+            # Works with XFCE, Cinnamon, GNOME, KDE, and other GTK-based DEs
             sudo pacman -S --needed \
                 libappindicator-gtk3 \
                 gtk3 \
                 python-gobject \
                 gobject-introspection \
-                cairo
+                cairo \
+                python-cairo \
+                gtk-update-icon-cache
             ;;
         opensuse*|sles)
             sudo zypper install -y \
@@ -358,23 +393,64 @@ install_base_dependencies() {
 install_python_packages() {
     print_status "Installing Python packages from requirements.txt..."
     
+    # Determine if we need --break-system-packages flag
+    # This is needed for newer Python installations (3.11+) on systems with externally-managed environments
+    BREAK_SYSTEM_FLAG=""
+    if python3 -c "import sys; exit(0 if sys.version_info >= (3, 11) else 1)" 2>/dev/null; then
+        # Python 3.11+ - try with --break-system-packages first
+        BREAK_SYSTEM_FLAG="--break-system-packages"
+    fi
+    
     if [ -f "$PROJECT_DIR/requirements.txt" ]; then
-        # Upgrade pip first
-        python3 -m pip install --upgrade pip --user 2>/dev/null || python3 -m pip install --upgrade pip
+        # Upgrade pip first (try with --break-system-packages for newer systems)
+        python3 -m pip install --upgrade pip --user $BREAK_SYSTEM_FLAG 2>/dev/null || \
+        python3 -m pip install --upgrade pip $BREAK_SYSTEM_FLAG 2>/dev/null || \
+        python3 -m pip install --upgrade pip --user 2>/dev/null || \
+        python3 -m pip install --upgrade pip
         
-        # Install requirements
-        python3 -m pip install --user -r "$PROJECT_DIR/requirements.txt" || \
-        pip3 install --user -r "$PROJECT_DIR/requirements.txt" || \
-        sudo pip3 install -r "$PROJECT_DIR/requirements.txt"
-        
-        print_success "Python packages installed"
+        # Install requirements - try multiple methods with --break-system-packages
+        print_status "Installing packages from requirements.txt..."
+        if python3 -m pip install --user $BREAK_SYSTEM_FLAG -r "$PROJECT_DIR/requirements.txt" 2>/dev/null; then
+            print_success "Python packages installed (user install)"
+        elif python3 -m pip install $BREAK_SYSTEM_FLAG -r "$PROJECT_DIR/requirements.txt" 2>/dev/null; then
+            print_success "Python packages installed (system install)"
+        elif pip3 install --user $BREAK_SYSTEM_FLAG -r "$PROJECT_DIR/requirements.txt" 2>/dev/null; then
+            print_success "Python packages installed (user install via pip3)"
+        elif pip3 install $BREAK_SYSTEM_FLAG -r "$PROJECT_DIR/requirements.txt" 2>/dev/null; then
+            print_success "Python packages installed (system install via pip3)"
+        elif sudo pip3 install $BREAK_SYSTEM_FLAG -r "$PROJECT_DIR/requirements.txt" 2>/dev/null; then
+            print_success "Python packages installed (sudo install)"
+        else
+            # Fallback without flag
+            python3 -m pip install --user -r "$PROJECT_DIR/requirements.txt" || \
+            pip3 install --user -r "$PROJECT_DIR/requirements.txt" || \
+            sudo pip3 install -r "$PROJECT_DIR/requirements.txt"
+            print_success "Python packages installed (fallback method)"
+        fi
     else
         print_warning "requirements.txt not found. Installing default packages..."
-        python3 -m pip install --upgrade pip --user 2>/dev/null || python3 -m pip install --upgrade pip
-        python3 -m pip install --user Pillow pystray PyYAML || \
-        pip3 install --user Pillow pystray PyYAML || \
-        sudo pip3 install Pillow pystray PyYAML
-        print_success "Default Python packages installed"
+        python3 -m pip install --upgrade pip --user $BREAK_SYSTEM_FLAG 2>/dev/null || \
+        python3 -m pip install --upgrade pip $BREAK_SYSTEM_FLAG 2>/dev/null || \
+        python3 -m pip install --upgrade pip --user 2>/dev/null || \
+        python3 -m pip install --upgrade pip
+        
+        if python3 -m pip install --user $BREAK_SYSTEM_FLAG Pillow pystray PyYAML 2>/dev/null; then
+            print_success "Default Python packages installed (user install)"
+        elif python3 -m pip install $BREAK_SYSTEM_FLAG Pillow pystray PyYAML 2>/dev/null; then
+            print_success "Default Python packages installed (system install)"
+        elif pip3 install --user $BREAK_SYSTEM_FLAG Pillow pystray PyYAML 2>/dev/null; then
+            print_success "Default Python packages installed (user install via pip3)"
+        elif pip3 install $BREAK_SYSTEM_FLAG Pillow pystray PyYAML 2>/dev/null; then
+            print_success "Default Python packages installed (system install via pip3)"
+        elif sudo pip3 install $BREAK_SYSTEM_FLAG Pillow pystray PyYAML 2>/dev/null; then
+            print_success "Default Python packages installed (sudo install)"
+        else
+            # Fallback without flag
+            python3 -m pip install --user Pillow pystray PyYAML || \
+            pip3 install --user Pillow pystray PyYAML || \
+            sudo pip3 install Pillow pystray PyYAML
+            print_success "Default Python packages installed (fallback method)"
+        fi
     fi
 }
 
@@ -415,21 +491,51 @@ check_postgresql() {
         print_success "PostgreSQL client is installed"
         
         # Check if PostgreSQL service is running
+        POSTGRES_RUNNING=false
+        
+        # Try multiple methods to check if PostgreSQL is running
         if systemctl is-active --quiet postgresql 2>/dev/null || \
-           systemctl is-active --quiet postgresql.service 2>/dev/null || \
-           pg_isready -q 2>/dev/null; then
+           systemctl is-active --quiet postgresql.service 2>/dev/null; then
+            POSTGRES_RUNNING=true
+        elif pg_isready -q 2>/dev/null; then
+            POSTGRES_RUNNING=true
+        elif sudo -u postgres pg_isready -q 2>/dev/null; then
+            POSTGRES_RUNNING=true
+        fi
+        
+        if [ "$POSTGRES_RUNNING" = true ]; then
             print_success "PostgreSQL service is running"
         else
             print_warning "PostgreSQL service may not be running."
-            echo "  To start PostgreSQL:"
+            echo "  Attempting to start PostgreSQL..."
             case $DISTRO in
                 ubuntu|debian|linuxmint|pop|elementary|fedora|rhel|centos|arch|manjaro|endeavour|garuda|opensuse*|sles)
-                    echo "    sudo systemctl start postgresql"
-                    echo "    sudo systemctl enable postgresql  # Enable on boot"
+                    sudo systemctl start postgresql 2>/dev/null || \
+                    sudo systemctl start postgresql.service 2>/dev/null || true
+                    sudo systemctl enable postgresql 2>/dev/null || \
+                    sudo systemctl enable postgresql.service 2>/dev/null || true
+                    # Wait a moment and check again
+                    sleep 2
+                    if systemctl is-active --quiet postgresql 2>/dev/null || \
+                       systemctl is-active --quiet postgresql.service 2>/dev/null; then
+                        print_success "PostgreSQL service started successfully"
+                    else
+                        echo "    If PostgreSQL still doesn't start, try manually:"
+                        echo "    sudo systemctl start postgresql"
+                        echo "    sudo systemctl enable postgresql  # Enable on boot"
+                    fi
                     ;;
                 alpine|gentoo)
-                    echo "    sudo rc-service postgresql start"
-                    echo "    sudo rc-update add postgresql default  # Enable on boot"
+                    sudo rc-service postgresql start 2>/dev/null || true
+                    sudo rc-update add postgresql default 2>/dev/null || true
+                    sleep 2
+                    if pg_isready -q 2>/dev/null; then
+                        print_success "PostgreSQL service started successfully"
+                    else
+                        echo "    If PostgreSQL still doesn't start, try manually:"
+                        echo "    sudo rc-service postgresql start"
+                        echo "    sudo rc-update add postgresql default  # Enable on boot"
+                    fi
                     ;;
             esac
         fi
