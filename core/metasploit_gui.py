@@ -447,6 +447,22 @@ class MetasploitGUI:
         
         # Session list data for multi-session and session groups
         self.session_list_data = []
+
+        # Global attack profile + automation state
+        self.attack_profile = {
+            "name": "Default Profile",
+            "workspace": self.current_workspace,
+            "targets": "",
+            "goal": "Full Compromise",
+            "os": "Unknown",
+            "payload": self.settings.get('default_payload', 'windows/meterpreter/reverse_tcp'),
+            "lhost": self.settings.get('default_lhost', '0.0.0.0'),
+            "lport": self.settings.get('default_lport', '4444'),
+            "creds_user": "",
+            "creds_pass": "",
+        }
+        self.profile_history = []
+        self.automation_steps = []
         
         # Load settings from file if exists
         self._load_settings()
@@ -1030,7 +1046,8 @@ class MetasploitGUI:
         self.notebook.select = lambda tab_index: self.select(tab_index)
         
         # Core tabs
-        self.create_quick_start_wizard_tab()  # Beginner-friendly first
+        self.create_automation_dashboard_tab()
+        self.create_environment_setup_tab()
         self.create_console_tab()
         self.create_exploit_search_tab()
         self.create_exploit_builder_tab()
@@ -1061,6 +1078,244 @@ class MetasploitGUI:
             foreground="#999999"
         )
         footer_label.pack(side=tk.BOTTOM, pady=(2, 0))
+
+    # ==================== AUTOMATION HELPERS ====================
+
+    def _detect_local_network_info(self):
+        """Detect local IP/workspace info for autofill."""
+        info = {
+            "workspace": self.current_workspace,
+            "lhost": self.attack_profile.get("lhost"),
+            "lport": self.attack_profile.get("lport"),
+        }
+        try:
+            result = subprocess.run(
+                ["hostname", "-I"],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if result.returncode == 0:
+                addresses = [ip for ip in result.stdout.strip().split() if ip]
+                if addresses:
+                    info["lhost"] = addresses[0]
+        except Exception:
+            pass
+
+        try:
+            route = subprocess.run(
+                ["ip", "route", "show", "default"],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if route.returncode == 0:
+                parts = route.stdout.strip().split()
+                if len(parts) >= 3 and parts[0] == "default" and parts[1] == "via":
+                    info["gateway"] = parts[2]
+        except Exception:
+            pass
+
+        return info
+
+    def _sync_profile_from_vars(self):
+        """Sync Tk variables into attack profile dict."""
+        if hasattr(self, "profile_name_var"):
+            self.attack_profile.update({
+                "name": self.profile_name_var.get().strip(),
+                "workspace": self.profile_workspace_var.get().strip() or self.current_workspace,
+                "targets": self.profile_targets_var.get().strip(),
+                "goal": self.profile_goal_var.get().strip(),
+                "os": self.profile_os_var.get().strip(),
+                "payload": self.profile_payload_var.get().strip() or self.attack_profile.get("payload"),
+                "lhost": self.profile_lhost_var.get().strip() or self.attack_profile.get("lhost"),
+                "lport": self.profile_lport_var.get().strip() or self.attack_profile.get("lport"),
+                "creds_user": self.profile_creds_user_var.get().strip(),
+                "creds_pass": self.profile_creds_pass_var.get().strip(),
+            })
+        return self.attack_profile.copy()
+
+    def _autofill_entry(self, entry_widget, value):
+        """Populate entry widget with provided value."""
+        if entry_widget is None or value in (None, ""):
+            return
+        entry_widget.delete(0, tk.END)
+        entry_widget.insert(0, value)
+
+    def _set_combobox_value(self, combobox_widget, value):
+        """Safely set combobox value when present."""
+        if combobox_widget is None or not value:
+            return
+        try:
+            combobox_widget.set(value)
+        except Exception:
+            pass
+
+    def _append_automation_log(self, message):
+        """Append a human-readable message to automation log."""
+        if not hasattr(self, "automation_log"):
+            return
+        self.automation_log.configure(state=tk.NORMAL)
+        self.automation_log.insert(tk.END, f"{message}\n")
+        self.automation_log.see(tk.END)
+        self.automation_log.configure(state=tk.DISABLED)
+
+    def apply_profile_to_tabs(self):
+        """Apply current attack profile across tabs for automation."""
+        profile = self._sync_profile_from_vars()
+        self.settings['default_lhost'] = profile.get('lhost', self.settings.get('default_lhost'))
+        self.settings['default_lport'] = profile.get('lport', self.settings.get('default_lport'))
+        self.settings['default_payload'] = profile.get('payload', self.settings.get('default_payload'))
+        self._save_settings()
+
+        if hasattr(self, "workspace_var"):
+            self.workspace_var.set(profile["workspace"])
+
+        if hasattr(self, "scan_target_entry"):
+            self._autofill_entry(self.scan_target_entry, profile.get("targets", ""))
+
+        if hasattr(self, "lhost_entry"):
+            self._autofill_entry(self.lhost_entry, profile.get("lhost", ""))
+        if hasattr(self, "lport_entry"):
+            self._autofill_entry(self.lport_entry, profile.get("lport", ""))
+        if hasattr(self, "payload_type"):
+            self._set_combobox_value(self.payload_type, profile.get("payload"))
+
+        if hasattr(self, "handler_lhost_entry"):
+            self._autofill_entry(self.handler_lhost_entry, profile.get("lhost", ""))
+        if hasattr(self, "handler_lport_entry"):
+            self._autofill_entry(self.handler_lport_entry, profile.get("lport", ""))
+        if hasattr(self, "handler_payload_var"):
+            self.handler_payload_var.set(profile.get("payload", self.handler_payload_var.get()))
+
+        self.profile_history.append(profile.copy())
+        self._append_automation_log("Applied attack profile to dependent tabs.")
+
+    def detect_profile_info(self):
+        """Auto-detect local information and populate profile inputs."""
+        detected = self._detect_local_network_info()
+        if not detected:
+            return
+        if hasattr(self, "profile_lhost_var") and detected.get("lhost"):
+            self.profile_lhost_var.set(detected["lhost"])
+        if hasattr(self, "profile_workspace_var") and detected.get("workspace"):
+            self.profile_workspace_var.set(detected["workspace"])
+        self._append_automation_log("Auto-detected local network details.")
+
+    def save_attack_profile(self):
+        """Persist current profile to history for reuse."""
+        profile = self._sync_profile_from_vars()
+        self.profile_history.append(profile.copy())
+        self._append_automation_log(f"Saved profile '{profile.get('name', 'Profile')}'.")
+
+    def load_attack_profile_from_db(self):
+        """Populate profile from first database host entry."""
+        if not self.hosts_data:
+            messagebox.showinfo("Automation", "No hosts loaded in database yet.")
+            return
+        host = self.hosts_data[0]
+        target = host.get("address") or host.get("ip") or ""
+        os_name = host.get("os_name") or host.get("os") or "Unknown"
+
+        if hasattr(self, "profile_targets_var"):
+            self.profile_targets_var.set(target)
+        if hasattr(self, "profile_os_var"):
+            self.profile_os_var.set(os_name)
+
+        self._append_automation_log("Loaded profile details from database host entry.")
+
+    def add_sequence_step(self, category, action):
+        """Add automation step to sequence list."""
+        step = {"category": category, "action": action}
+        self.automation_steps.append(step)
+        if hasattr(self, "auto_sequence_tree"):
+            self.auto_sequence_tree.insert("", tk.END, values=(len(self.automation_steps), category, action))
+        self._append_automation_log(f"Added step: {category} - {action}")
+
+    def reset_automation_sequence(self):
+        """Clear automation sequence steps."""
+        self.automation_steps.clear()
+        if hasattr(self, "auto_sequence_tree"):
+            for item in self.auto_sequence_tree.get_children():
+                self.auto_sequence_tree.delete(item)
+        self._append_automation_log("Cleared automation sequence.")
+
+    def _execute_sequence_step(self, step):
+        """Execute a single automation step based on action label."""
+        action = step.get("action")
+        if action == "Quick Recon Scan":
+            self.run_scan("quick")
+        elif action == "Full Vulnerability Scan":
+            self.run_scan("vuln")
+        elif action == "Generate Payload":
+            self.generate_payload()
+        elif action == "Auto Setup Exploit":
+            self.auto_setup_exploit()
+        elif action == "Setup Handler":
+            self.setup_handler()
+        elif action == "Start Handler":
+            self.start_handler()
+        elif action == "Collect Post-Exploitation Data":
+            self.refresh_post_sessions()
+        elif action == "Run Quick Actions":
+            self.quick_action_scan_ports()
+        else:
+            self._append_automation_log(f"No automation binding for: {action}")
+            return
+        self._append_automation_log(f"Executed step: {action}")
+
+    def run_automation_sequence(self):
+        """Execute queued automation tasks sequentially."""
+        if not self.automation_steps:
+            messagebox.showinfo("Automation", "No steps queued. Add steps first.")
+            return
+        profile = self._sync_profile_from_vars()
+        self._append_automation_log(f"Running automation sequence for targets: {profile.get('targets', 'N/A')}")
+        for step in list(self.automation_steps):
+            self._execute_sequence_step(step)
+
+    def refresh_environment_checks(self):
+        """Evaluate local dependencies and present results."""
+        checks = []
+        ready = True
+
+        msf_path = shutil.which("msfconsole")
+        if msf_path:
+            checks.append(f"✔ msfconsole detected at {msf_path}")
+        else:
+            checks.append("✖ msfconsole not found in PATH")
+            ready = False
+
+        nmap_path = shutil.which("nmap")
+        if nmap_path:
+            checks.append(f"✔ nmap available at {nmap_path}")
+        else:
+            checks.append("✖ nmap not found (recommended for scanning)")
+
+        psql_path = shutil.which("psql")
+        if psql_path:
+            checks.append(f"✔ PostgreSQL client found at {psql_path}")
+        else:
+            checks.append("✖ PostgreSQL client missing (needed for msfdb)")
+            ready = False
+
+        if self.database_connected:
+            checks.append("✔ Metasploit database connected")
+        else:
+            checks.append("• Database not connected yet")
+
+        if self.console and self.console.running:
+            checks.append("✔ Metasploit console session active")
+        else:
+            checks.append("• Console not running")
+
+        status_text = "Status: Ready" if ready else "Status: Needs attention"
+        if hasattr(self, "env_status_var"):
+            self.env_status_var.set(status_text)
+
+        if hasattr(self, "environment_checks_output"):
+            self.environment_checks_output.delete("1.0", tk.END)
+            self.environment_checks_output.insert("1.0", "\n".join(checks))
     
     def create_console_tab(self):
         """Create the integrated Metasploit console tab."""
@@ -1285,6 +1540,11 @@ class MetasploitGUI:
         )
         self.payload_type.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
         self.payload_type.set("windows/meterpreter/reverse_tcp")
+        ttk.Button(
+            type_frame,
+            text="Use Profile",
+            command=lambda: self._set_combobox_value(self.payload_type, self.attack_profile.get("payload"))
+        ).pack(side=tk.RIGHT)
         
         options_frame = ttk.LabelFrame(payload_frame, text="Options", padding="3")
         options_frame.pack(fill=tk.X, pady=(0, 5))
@@ -1296,6 +1556,11 @@ class MetasploitGUI:
         self.lhost_entry = ttk.Entry(lhost_frame)
         self.lhost_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.lhost_entry.insert(0, "127.0.0.1")
+        ttk.Button(
+            lhost_frame,
+            text="Auto",
+            command=lambda: self._autofill_entry(self.lhost_entry, self.attack_profile.get("lhost"))
+        ).pack(side=tk.LEFT, padx=(5, 0))
         
         lport_frame = ttk.Frame(options_frame)
         lport_frame.pack(fill=tk.X, pady=2)
@@ -1304,6 +1569,11 @@ class MetasploitGUI:
         self.lport_entry = ttk.Entry(lport_frame)
         self.lport_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.lport_entry.insert(0, "4444")
+        ttk.Button(
+            lport_frame,
+            text="Auto",
+            command=lambda: self._autofill_entry(self.lport_entry, self.attack_profile.get("lport"))
+        ).pack(side=tk.LEFT, padx=(5, 0))
         
         format_frame = ttk.Frame(options_frame)
         format_frame.pack(fill=tk.X, pady=2)
@@ -1516,17 +1786,43 @@ class MetasploitGUI:
         
         ttk.Label(handler_type_frame, text="Handler Type:", width=15).pack(side=tk.LEFT)
         self.handler_type_var = tk.StringVar(value="exploit/multi/handler")
-        # All available Metasploit handler types
+        # All available Metasploit handler types - comprehensive list
         handler_types = [
-            "exploit/multi/handler",  # Standard multi-platform handler (most common)
+            # Standard multi-platform handlers (most common)
+            "exploit/multi/handler",  # Standard multi-platform handler - supports all payloads
+            
+            # Persistence handlers
             "exploit/windows/local/persistence",  # Windows persistence handler
             "exploit/linux/local/persistence",  # Linux persistence handler
             "exploit/unix/local/persistence",  # Unix persistence handler
-            "exploit/multi/script/web_delivery",  # Web delivery handler
+            
+            # Web delivery handlers (language-specific)
+            "exploit/multi/script/web_delivery",  # Generic web delivery handler
             "exploit/multi/script/web_delivery_psh",  # PowerShell web delivery handler
             "exploit/multi/script/web_delivery_python",  # Python web delivery handler
             "exploit/multi/script/web_delivery_jsp",  # JSP web delivery handler
             "exploit/multi/script/web_delivery_php",  # PHP web delivery handler
+            "exploit/multi/script/web_delivery_ruby",  # Ruby web delivery handler
+            "exploit/multi/script/web_delivery_perl",  # Perl web delivery handler
+            
+            # Additional handler modules
+            "exploit/windows/local/persistence_service",  # Windows service persistence
+            "exploit/windows/local/persistence_registry",  # Windows registry persistence
+            "exploit/windows/local/persistence_scheduled_task",  # Windows scheduled task persistence
+            "exploit/windows/local/persistence_startup",  # Windows startup persistence
+            "exploit/linux/local/persistence_systemd",  # Linux systemd persistence
+            "exploit/linux/local/persistence_cron",  # Linux cron persistence
+            "exploit/unix/local/persistence_cron",  # Unix cron persistence
+            
+            # HTTP-based handlers
+            "exploit/multi/http/shell_injection",  # HTTP shell injection handler
+            "exploit/linux/http/shell_injection",  # Linux HTTP shell injection
+            "exploit/windows/http/shell_injection",  # Windows HTTP shell injection
+            
+            # Additional web delivery variants
+            "exploit/multi/script/web_delivery_java",  # Java web delivery
+            "exploit/multi/script/web_delivery_war",  # WAR web delivery
+            "exploit/multi/script/web_delivery_hta",  # HTA web delivery
         ]
         handler_combo = ttk.Combobox(
             handler_type_frame,
@@ -1551,6 +1847,11 @@ class MetasploitGUI:
             width=50
         )
         handler_payload_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(
+            payload_frame,
+            text="Use Profile",
+            command=lambda: self.handler_payload_var.set(self.attack_profile.get("payload", self.handler_payload_var.get()))
+        ).pack(side=tk.LEFT, padx=(5, 0))
         
         # LHOST
         lhost_frame = ttk.Frame(type_frame)
@@ -1560,6 +1861,11 @@ class MetasploitGUI:
         self.handler_lhost_entry = ttk.Entry(lhost_frame)
         self.handler_lhost_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.handler_lhost_entry.insert(0, "0.0.0.0")
+        ttk.Button(
+            lhost_frame,
+            text="Auto",
+            command=lambda: self._autofill_entry(self.handler_lhost_entry, self.attack_profile.get("lhost"))
+        ).pack(side=tk.LEFT, padx=(5, 0))
         
         # LPORT
         lport_frame = ttk.Frame(type_frame)
@@ -1569,6 +1875,11 @@ class MetasploitGUI:
         self.handler_lport_entry = ttk.Entry(lport_frame)
         self.handler_lport_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.handler_lport_entry.insert(0, "4444")
+        ttk.Button(
+            lport_frame,
+            text="Auto",
+            command=lambda: self._autofill_entry(self.handler_lport_entry, self.attack_profile.get("lport"))
+        ).pack(side=tk.LEFT, padx=(5, 0))
         
         # Auto migrate
         migrate_frame = ttk.Frame(type_frame)
@@ -3710,52 +4021,155 @@ help             - Show meterpreter help
     
     # ==================== NEW TAB CREATION METHODS ====================
     
-    def create_quick_start_wizard_tab(self):
-        """Create Quick Start Wizard tab for beginners."""
-        wizard_frame = ttk.Frame(self.notebook, padding="5")
-        self.notebook.add(wizard_frame, text="Quick Start")
-        
-        # Welcome section
-        welcome_frame = ttk.LabelFrame(wizard_frame, text="Welcome to YaP Metasploit GUI", padding="5")
-        welcome_frame.pack(fill=tk.X, pady=(0, 5))
-        
-        welcome_text = """This wizard will guide you through common Metasploit tasks.
-Select what you want to do below to get started."""
-        ttk.Label(welcome_frame, text=welcome_text, wraplength=600).pack(anchor=tk.W)
-        
-        # Scenario selection
-        scenario_frame = ttk.LabelFrame(wizard_frame, text="What do you want to do?", padding="5")
-        scenario_frame.pack(fill=tk.BOTH, expand=True)
-        
-        scenarios = [
-            ("Generate a Payload", "I want to create a payload to exploit a target"),
-            ("Set Up a Listener", "I want to set up a handler to receive connections"),
-            ("Search for Exploits", "I want to find exploits for a vulnerability"),
-            ("Scan for Vulnerabilities", "I want to scan a target for vulnerabilities"),
-            ("Manage Sessions", "I want to interact with active sessions"),
-            ("Post-Exploitation", "I want to perform post-exploitation tasks"),
+    def create_automation_dashboard_tab(self):
+        """Create Automation Dashboard tab with attack profiles and sequencing."""
+        dashboard_frame = ttk.Frame(self.notebook, padding="5")
+        self.notebook.add(dashboard_frame, text="Automation Dashboard")
+
+        # Attack profile section
+        profile_frame = ttk.LabelFrame(dashboard_frame, text="Attack Profile & Autofill", padding="5")
+        profile_frame.pack(fill=tk.X, pady=(0, 5))
+
+        self.profile_name_var = tk.StringVar(value=self.attack_profile.get("name", "Default Profile"))
+        self.profile_workspace_var = tk.StringVar(value=self.attack_profile.get("workspace", self.current_workspace))
+        self.profile_targets_var = tk.StringVar(value=self.attack_profile.get("targets", ""))
+        self.profile_goal_var = tk.StringVar(value=self.attack_profile.get("goal", "Full Compromise"))
+        self.profile_os_var = tk.StringVar(value=self.attack_profile.get("os", "Unknown"))
+        self.profile_payload_var = tk.StringVar(value=self.attack_profile.get("payload", self.settings.get('default_payload')))
+        self.profile_lhost_var = tk.StringVar(value=self.attack_profile.get("lhost", self.settings.get('default_lhost')))
+        self.profile_lport_var = tk.StringVar(value=self.attack_profile.get("lport", self.settings.get('default_lport')))
+        self.profile_creds_user_var = tk.StringVar(value=self.attack_profile.get("creds_user", ""))
+        self.profile_creds_pass_var = tk.StringVar(value=self.attack_profile.get("creds_pass", ""))
+
+        field_specs = [
+            ("Profile Name", self.profile_name_var),
+            ("Workspace", self.profile_workspace_var),
+            ("Target(s)", self.profile_targets_var),
+            ("Primary OS", self.profile_os_var),
         ]
-        
-        self.wizard_scenario_var = tk.StringVar()
-        for i, (title, desc) in enumerate(scenarios):
-            rb = ttk.Radiobutton(
-                scenario_frame,
-                text=f"{title}: {desc}",
-                variable=self.wizard_scenario_var,
-                value=title
-            )
-            rb.pack(anchor=tk.W, pady=2)
-        
-        # Action buttons
-        action_frame = ttk.Frame(wizard_frame)
-        action_frame.pack(fill=tk.X, pady=(5, 0))
-        
-        start_wizard_btn = ttk.Button(
-            action_frame,
-            text="Start Wizard",
-            command=self.run_quick_start_wizard
+
+        for label, var in field_specs:
+            row = ttk.Frame(profile_frame)
+            row.pack(fill=tk.X, pady=2)
+            ttk.Label(row, text=f"{label}:", width=18).pack(side=tk.LEFT)
+            ttk.Entry(row, textvariable=var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        goal_row = ttk.Frame(profile_frame)
+        goal_row.pack(fill=tk.X, pady=2)
+        ttk.Label(goal_row, text="Attack Goal:", width=18).pack(side=tk.LEFT)
+        goals = [
+            "Full Compromise",
+            "Initial Access",
+            "Persistence",
+            "Credential Harvesting",
+            "Data Exfiltration",
+        ]
+        goal_combo = ttk.Combobox(goal_row, textvariable=self.profile_goal_var, values=goals, state="readonly")
+        goal_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        payload_row = ttk.Frame(profile_frame)
+        payload_row.pack(fill=tk.X, pady=2)
+        ttk.Label(payload_row, text="Preferred Payload:", width=18).pack(side=tk.LEFT)
+        payload_combo = ttk.Combobox(
+            payload_row,
+            textvariable=self.profile_payload_var,
+            values=ALL_PAYLOADS,
+            state="readonly",
+            width=50
         )
-        start_wizard_btn.pack(side=tk.LEFT, padx=(0, 5))
+        payload_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        network_row = ttk.Frame(profile_frame)
+        network_row.pack(fill=tk.X, pady=2)
+        ttk.Label(network_row, text="LHOST / LPORT:", width=18).pack(side=tk.LEFT)
+        ttk.Entry(network_row, textvariable=self.profile_lhost_var, width=18).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Entry(network_row, textvariable=self.profile_lport_var, width=8).pack(side=tk.LEFT)
+        ttk.Button(
+            network_row,
+            text="Detect",
+            command=self.detect_profile_info,
+            width=10
+        ).pack(side=tk.LEFT, padx=(5, 0))
+
+        creds_row = ttk.Frame(profile_frame)
+        creds_row.pack(fill=tk.X, pady=2)
+        ttk.Label(creds_row, text="Creds (user/pass):", width=18).pack(side=tk.LEFT)
+        ttk.Entry(creds_row, textvariable=self.profile_creds_user_var, width=18).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Entry(creds_row, textvariable=self.profile_creds_pass_var, width=18, show="*").pack(side=tk.LEFT)
+
+        profile_btn_row = ttk.Frame(profile_frame)
+        profile_btn_row.pack(fill=tk.X, pady=(5, 0))
+        ttk.Button(profile_btn_row, text="Apply to Tabs", command=self.apply_profile_to_tabs).pack(side=tk.LEFT)
+        ttk.Button(profile_btn_row, text="Save Profile", command=self.save_attack_profile).pack(side=tk.LEFT, padx=5)
+        ttk.Button(profile_btn_row, text="Load From Database", command=self.load_attack_profile_from_db).pack(side=tk.LEFT)
+
+        # Automation sequencing
+        sequence_frame = ttk.LabelFrame(dashboard_frame, text="Automation Sequencer", padding="5")
+        sequence_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+
+        columns = ("Step", "Category", "Action")
+        self.auto_sequence_tree = ttk.Treeview(sequence_frame, columns=columns, show="headings", height=6)
+        for col in columns:
+            self.auto_sequence_tree.heading(col, text=col)
+            self.auto_sequence_tree.column(col, width=150)
+        self.auto_sequence_tree.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+
+        seq_controls = ttk.Frame(sequence_frame)
+        seq_controls.pack(fill=tk.X, pady=2)
+        ttk.Button(seq_controls, text="Add Recon Scan", command=lambda: self.add_sequence_step("Recon", "Quick Recon Scan")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(seq_controls, text="Add Vuln Scan", command=lambda: self.add_sequence_step("Recon", "Full Vulnerability Scan")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(seq_controls, text="Add Exploit Setup", command=lambda: self.add_sequence_step("Exploit", "Auto Setup Exploit")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(seq_controls, text="Add Payload Build", command=lambda: self.add_sequence_step("Payload", "Generate Payload")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(seq_controls, text="Add Handler Start", command=lambda: self.add_sequence_step("Listener", "Start Handler")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(seq_controls, text="Add Post Actions", command=lambda: self.add_sequence_step("Post", "Collect Post-Exploitation Data")).pack(side=tk.LEFT, padx=2)
+
+        seq_actions = ttk.Frame(sequence_frame)
+        seq_actions.pack(fill=tk.X, pady=(5, 0))
+        ttk.Button(seq_actions, text="Run Sequence", command=self.run_automation_sequence).pack(side=tk.LEFT)
+        ttk.Button(seq_actions, text="Clear Sequence", command=self.reset_automation_sequence).pack(side=tk.LEFT, padx=5)
+
+        # Automation log / guidance
+        log_frame = ttk.LabelFrame(dashboard_frame, text="Automation Guidance & Log", padding="5")
+        log_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.automation_log = scrolledtext.ScrolledText(log_frame, height=6, wrap=tk.WORD, state=tk.DISABLED)
+        self.automation_log.pack(fill=tk.BOTH, expand=True)
+        self._append_automation_log("Automation dashboard ready. Build a profile and queue tasks.")
+
+    def create_environment_setup_tab(self):
+        """Create Environment Setup tab to automate prerequisites."""
+        env_frame = ttk.Frame(self.notebook, padding="5")
+        self.notebook.add(env_frame, text="Environment Setup")
+
+        status_frame = ttk.LabelFrame(env_frame, text="Framework Status", padding="5")
+        status_frame.pack(fill=tk.X, pady=(0, 5))
+
+        self.env_status_var = tk.StringVar(value="Status: Not checked")
+        status_label = ttk.Label(status_frame, textvariable=self.env_status_var, foreground="#555555")
+        status_label.pack(anchor=tk.W)
+
+        btn_frame = ttk.Frame(status_frame)
+        btn_frame.pack(fill=tk.X, pady=(5, 0))
+
+        ttk.Button(btn_frame, text="Check Dependencies", command=self.refresh_environment_checks).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Init Database", command=self.initialize_database).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="msfdb init", command=self.run_msfdb_init_gui).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Start Console", command=self.start_console).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Apply Profile", command=self.apply_profile_to_tabs).pack(side=tk.LEFT, padx=2)
+
+        guidance = ttk.Label(
+            status_frame,
+            text="Use these shortcuts to prep environment quickly before automation runs.",
+            foreground="#666666"
+        )
+        guidance.pack(anchor=tk.W, pady=(4, 0))
+
+        checks_frame = ttk.LabelFrame(env_frame, text="Dependency Report", padding="5")
+        checks_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.environment_checks_output = scrolledtext.ScrolledText(checks_frame, height=12, wrap=tk.WORD)
+        self.environment_checks_output.pack(fill=tk.BOTH, expand=True)
+        self.refresh_environment_checks()
     
     def create_database_manager_tab(self):
         """Create Database Manager tab."""
@@ -3980,6 +4394,11 @@ Select what you want to do below to get started."""
         self.scan_target_entry = ttk.Entry(target_input_frame)
         self.scan_target_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         self.scan_target_entry.insert(0, "127.0.0.1")
+        ttk.Button(
+            target_input_frame,
+            text="Auto",
+            command=lambda: self._autofill_entry(self.scan_target_entry, self.attack_profile.get("targets"))
+        ).pack(side=tk.LEFT)
         
         # Quick scan buttons
         quick_scan_frame = ttk.Frame(target_frame)
@@ -4713,6 +5132,24 @@ Select what you want to do below to get started."""
         
         for col in range(2):
             db_frame.columnconfigure(col, weight=1)
+        
+        # External Tools actions
+        tools_frame = ttk.Frame(categories_notebook, padding="5")
+        categories_notebook.add(tools_frame, text="External Tools")
+        
+        tools_actions = [
+            ("Launch airgeddon", lambda: self.launch_external_tool("airgeddon")),
+            ("Launch Wireshark", lambda: self.launch_external_tool("wireshark")),
+            ("Launch Nmap", lambda: self.launch_external_tool("nmap", args=["-h"])),
+            ("Launch Aircrack-ng", lambda: self.launch_external_tool("aircrack-ng", args=["-h"])),
+        ]
+        
+        for i, (name, command) in enumerate(tools_actions):
+            btn = ttk.Button(tools_frame, text=name, command=command, width=25)
+            btn.grid(row=i // 2, column=i % 2, padx=5, pady=5, sticky=(tk.W, tk.E))
+        
+        for col in range(2):
+            tools_frame.columnconfigure(col, weight=1)
     
     def create_settings_tab(self):
         """Create Settings/Preferences tab."""
@@ -4857,29 +5294,8 @@ Select what you want to do below to get started."""
     # ==================== SUPPORTING METHODS FOR NEW TABS ====================
     
     def run_quick_start_wizard(self):
-        """Run the quick start wizard based on selected scenario."""
-        scenario = self.wizard_scenario_var.get()
-        if not scenario:
-            messagebox.showinfo("Info", "Please select a scenario first.")
-            return
-        
-        # Switch to appropriate tab based on scenario
-        tab_map = {
-            "Generate a Payload": "Payload Generator",
-            "Set Up a Listener": "Handler Setup",
-            "Search for Exploits": "Exploit Search",
-            "Scan for Vulnerabilities": "Vulnerability Scanner",
-            "Manage Sessions": "Session Manager",
-            "Post-Exploitation": "Post-Exploitation",
-        }
-        
-        target_tab = tab_map.get(scenario)
-        if target_tab:
-            # Find and select the tab
-            for i in range(self.notebook.index("end")):
-                if self.notebook.tab(i, "text") == target_tab:
-                    self.notebook.select(i)
-                    break
+        """Backward-compatible alias that triggers the automation sequence."""
+        self.run_automation_sequence()
     
     def switch_workspace(self):
         """Switch to a different workspace."""
@@ -7692,6 +8108,107 @@ Loot Items: {len(self.loot_data)}
             self.console.send_command("db_status")
         else:
             messagebox.showinfo("Database Status", f"Database Connected: {self.database_connected}")
+    
+    def launch_external_tool(self, tool_name, args=None):
+        """Launch an external tool in a separate terminal window that stays open."""
+        if args is None:
+            args = []
+        
+        # Check if tool exists
+        tool_path = shutil.which(tool_name)
+        if not tool_path:
+            messagebox.showerror("Error", f"{tool_name} not found. Please install it first.")
+            self.log_output(f"[-] {tool_name} not found in PATH\n", "error")
+            return
+        
+        # Detect available terminal emulator
+        terminals = [
+            ("gnome-terminal", ["--", "bash", "-c"]),
+            ("xterm", ["-e", "bash", "-c"]),
+            ("konsole", ["-e", "bash", "-c"]),
+            ("xfce4-terminal", ["-e", "bash", "-c"]),
+            ("mate-terminal", ["-e", "bash", "-c"]),
+            ("lxterminal", ["-e", "bash", "-c"]),
+            ("terminator", ["-e", "bash", "-c"]),
+            ("tilix", ["-e", "bash", "-c"]),
+            ("alacritty", ["-e", "bash", "-c"]),
+        ]
+        
+        terminal_cmd = None
+        terminal_args = None
+        
+        for term, term_args in terminals:
+            if shutil.which(term):
+                terminal_cmd = term
+                terminal_args = term_args
+                break
+        
+        if not terminal_cmd:
+            messagebox.showerror("Error", "No terminal emulator found. Please install one (gnome-terminal, xterm, konsole, etc.)")
+            return
+        
+        # Special handling for airgeddon - it's a bash script that needs to run in its directory
+        if tool_name == "airgeddon":
+            # Try to find airgeddon script
+            possible_paths = [
+                "/opt/airgeddon/airgeddon.sh",
+                "/usr/local/bin/airgeddon",
+                "/usr/bin/airgeddon",
+                os.path.expanduser("~/airgeddon/airgeddon.sh"),
+                os.path.expanduser("~/airgeddon.sh"),
+            ]
+            
+            airgeddon_path = None
+            for path in possible_paths:
+                if os.path.exists(path) and os.access(path, os.X_OK):
+                    airgeddon_path = path
+                    break
+            
+            if not airgeddon_path:
+                # Try to find it in PATH
+                airgeddon_path = shutil.which("airgeddon")
+                if not airgeddon_path:
+                    messagebox.showerror("Error", "airgeddon not found. Please install it first.\n\nCommon locations:\n- /opt/airgeddon/airgeddon.sh\n- ~/airgeddon/airgeddon.sh")
+                    return
+            
+            # Get the directory containing airgeddon
+            airgeddon_dir = os.path.dirname(airgeddon_path)
+            if not airgeddon_dir:
+                airgeddon_dir = os.getcwd()
+            
+            # Build command to cd to directory and run airgeddon, then keep terminal open
+            cmd_str = f"cd '{airgeddon_dir}' && bash '{airgeddon_path}'; echo ''; echo 'airgeddon exited. Press Enter to close this window...'; read"
+        else:
+            # Build the command to run in the terminal
+            # The command should execute the tool and then keep the terminal open
+            if args:
+                cmd_str = f"{tool_name} {' '.join(args)}; echo ''; echo 'Press Enter to close this window...'; read"
+            else:
+                cmd_str = f"{tool_name}; echo ''; echo 'Press Enter to close this window...'; read"
+        
+        # For gnome-terminal, we need special handling
+        if terminal_cmd == "gnome-terminal":
+            try:
+                # Use gnome-terminal's -- bash -c syntax
+                full_cmd = [terminal_cmd, "--title", f"{tool_name}", "--", "bash", "-c", cmd_str]
+                process = subprocess.Popen(full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.log_output(f"[+] Launched {tool_name} in {terminal_cmd} terminal (PID: {process.pid})\n", "output")
+                self.log_output(f"[*] {tool_name} is running in a separate terminal window\n", "output")
+                self.log_output(f"[*] Close the terminal window to stop {tool_name}\n", "output")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to launch {tool_name}: {str(e)}")
+                self.log_output(f"[-] Error launching {tool_name}: {str(e)}\n", "error")
+        else:
+            try:
+                # For other terminals, use their -e flag
+                full_cmd = [terminal_cmd] + terminal_args + [cmd_str]
+                process = subprocess.Popen(full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.log_output(f"[+] Launched {tool_name} in {terminal_cmd} terminal (PID: {process.pid})\n", "output")
+                self.log_output(f"[*] {tool_name} is running in a separate terminal window\n", "output")
+                self.log_output(f"[*] Close the terminal window to stop {tool_name}\n", "output")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to launch {tool_name}: {str(e)}")
+                self.log_output(f"[-] Error launching {tool_name}: {str(e)}\n", "error")
     
     def on_closing(self):
         """Handle window close event."""
